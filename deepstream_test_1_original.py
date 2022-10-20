@@ -2,7 +2,7 @@ import sys
 sys.path.append('../')
 import gi
 gi.require_version('Gst', '1.0')
-from gi.repository import GLib, Gst
+from gi.repository import GObject, Gst
 from common.is_aarch_64 import is_aarch64
 from common.bus_call import bus_call
 
@@ -109,6 +109,7 @@ def main(args):
         sys.exit(1)
 
     # Standard GStreamer initialization
+    GObject.threads_init()
     Gst.init(None)
 
     # Create gstreamer elements
@@ -160,14 +161,40 @@ def main(args):
     if not nvosd:
         sys.stderr.write(" Unable to create nvosd \n")
 
-    # Finally render the osd output
-    if is_aarch64():
-        transform = Gst.ElementFactory.make("nvegltransform", "nvegl-transform")
+    nvvidconv2 = Gst.ElementFactory.make("nvvideoconvert", "convertor2")
+    if not nvvidconv2:
+        sys.stderr.write(" Unable to create nvvidconv2 \n")
 
-    print("Creating EGLSink \n")
-    sink = Gst.ElementFactory.make("nveglglessink", "nvvideo-renderer")
+    capsfilter = Gst.ElementFactory.make("capsfilter", "capsfilter")
+    if not capsfilter:
+        sys.stderr.write(" Unable to create capsfilter \n")
+
+    caps = Gst.Caps.from_string("video/x-raw, format=I420")
+    capsfilter.set_property("caps", caps)
+
+    encoder = Gst.ElementFactory.make("avenc_mpeg4", "encoder")
+    if not encoder:
+        sys.stderr.write(" Unable to create encoder \n")
+    encoder.set_property("bitrate", 2000000)
+
+    print("Creating Code Parser \n")
+    codeparser = Gst.ElementFactory.make("mpeg4videoparse", "mpeg4-parser")
+    if not codeparser:
+        sys.stderr.write(" Unable to create code parser \n")
+
+    print("Creating Container \n")
+    container = Gst.ElementFactory.make("qtmux", "qtmux")
+    if not container:
+        sys.stderr.write(" Unable to create code parser \n")
+
+    print("Creating Sink \n")
+    sink = Gst.ElementFactory.make("filesink", "filesink")
     if not sink:
-        sys.stderr.write(" Unable to create egl sink \n")
+        sys.stderr.write(" Unable to create file sink \n")
+
+    sink.set_property("location", "./out.mp4")
+    sink.set_property("sync", 1)
+    sink.set_property("async", 0)
 
     print("Playing file %s " %args[1])
     source.set_property('location', args[1])
@@ -184,10 +211,13 @@ def main(args):
     pipeline.add(streammux)
     pipeline.add(pgie)
     pipeline.add(nvvidconv)
+    pipeline.add(nvvidconv2)
+    pipeline.add(encoder)
+    pipeline.add(capsfilter)
+    pipeline.add(codeparser)
+    pipeline.add(container)
     pipeline.add(nvosd)
     pipeline.add(sink)
-    if is_aarch64():
-        pipeline.add(transform)
 
     # we link the elements together
     # file-source -> h264-parser -> nvh264-decoder ->
@@ -206,14 +236,22 @@ def main(args):
     streammux.link(pgie)
     pgie.link(nvvidconv)
     nvvidconv.link(nvosd)
-    if is_aarch64():
-        nvosd.link(transform)
-        transform.link(sink)
-    else:
-        nvosd.link(sink)
+    nvosd.link(nvvidconv2)
+    nvvidconv2.link(capsfilter)
+    capsfilter.link(encoder)
+    encoder.link(codeparser)
+
+    sinkpad1 = container.get_request_pad("video_0")
+    if not sinkpad1:
+        sys.stderr.write(" Unable to get the sink pad of qtmux \n")
+    srcpad1 = codeparser.get_static_pad("src")
+    if not srcpad1:
+        sys.stderr.write(" Unable to get mpeg4 parse src pad \n")
+    srcpad1.link(sinkpad1)
+    container.link(sink)
 
     # create an event loop and feed gstreamer bus mesages to it
-    loop = GLib.MainLoop()
+    loop = GObject.MainLoop()
     bus = pipeline.get_bus()
     bus.add_signal_watch()
     bus.connect ("message", bus_call, loop)
